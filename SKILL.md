@@ -122,6 +122,13 @@ keywords:
 ```
 
 - 每条必含：标题、链接、来源、真实数据（有 official 时）、**desc 一句话**、**一句话匹配理由**
+- **official 字段路径（2026-09-03 实测踩坑，读错路径=dl 全显 0）**：官方数据在 `r["official"]` 嵌套对象里，键名是**短名**不是 API 原名：
+  - `r["official"]["downloads"]` ← API `downloadCount`（❌不存在 `official.downloadCount`）
+  - `r["official"]["likes"]` ← API `likeCount`；`r["official"]["collections"]` ← API `collectionCount`
+  - `r["official"]["staff_pick"]` ← API `isStaffPicked`；另有 `title/summary/cover/tags/categories/author/license`
+  - Printables 层的计数在**顶层** `r["downloads"]` / `r["likes"]`（无 official 对象）
+  - 排序结果看 `r["final_score"]`，启发式明细看 `r["score"]`+`r["signals"]`
+  - 写显示代码前先 dump 一条 `json.dumps(results[0], indent=2)` 确认路径，不要凭记忆写键名
 - **数字显示用 `isinstance(n, int)` 判断，不要 `n or '?'`**——0 会被显示成 '?'
 - **排序规则（两层）：** 脚本已按 final_score（官方真实数据+精选加权+启发式×5兜底）排序，但**热度 ≠ 意图匹配**——agent 必须把脚本排序当候选池，再按用户意图做最终排序。实测案例①：洞洞板本体 413 下载排第一，但用户要的是数据线收纳。实测案例②：「马里奥洞洞板」查询混入 Kakashi/McLaren/圣诞星——作者发布后改了标题，DDG 旧索引+URL slug 残留旧拼音触发召回（官方 API 的 title 与新内容一致，但召回源仍是旧的）。agent 输出前必须逐条判断「标题/简介/tags 与意图的相符度」，不符的剔除或排末位并说明
 - **staff_pick 是金信号**：`official.staff_pick=true` 优先推荐（官方人工精选背书）。实测：马里奥查询第一名「Ikea Skadis Mario NEW DESIGN」精选+18,302收藏，final_score 断层领先，真实数据排序直接把爆款顶出来了
