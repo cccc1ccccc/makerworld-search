@@ -1,10 +1,12 @@
 # makerworld-search
 
+<p align="center">
+  <img src="docs/architecture.png" alt="makerworld-search architecture: L1 intent rewrite → L2 DDG discovery → L0 official design-service enrichment → L3 intent gatekeeping" width="620">
+</p>
+
 **A natural-language semantic search skill for [MakerWorld](https://makerworld.com) (Bambu Lab's 3D-print model community) — for any AI agent.**
 
 > Say *"find me a pegboard cable holder"* or *"搜一个怪物猎人冰箱贴"* — the agent rewrites your intent into bilingual keyword groups, discovers candidate models, enriches every candidate with **real official data** (downloads / likes / collections / staff-pick) via Bambu's design-service endpoint, and hands you a shortlist that actually matches what you meant.
-
-[architecture diagram](docs/architecture.png)
 
 ## Why
 
@@ -69,8 +71,6 @@ MIT — see [SKILL.md](SKILL.md) frontmatter. Endpoint credit: Bambuddy wiki / P
 **给任何 AI agent 用的 [MakerWorld](https://makerworld.com)（拓竹模型社区）自然语言搜索 skill。**
 
 > 说「找一个挂洞洞板的数据线收纳」或 *"find me a Monster Hunter keychain"* — agent 把你的意图改写成中英双语关键词组，发现候选模型，再通过拓竹官方 design-service 端点给每个候选补上**真实数据**（下载/点赞/收藏/官方精选），交给你一份真正对口的候选清单。
-
-[架构图](docs/architecture.png)
 
 ## 为什么做这个
 
