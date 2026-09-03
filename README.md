@@ -37,7 +37,7 @@ python3 scripts/search_mw.py "手机支架" --source cn
 python3 scripts/search_mw.py "pegboard cable holder" --source intl
 python3 scripts/search_mw.py "mario pegboard" --source plain
 # metadata for one known URL
-python3 search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
+python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
 ```
 
 The agent side of the protocol (L1 rewrite rules, L3 gatekeeping checklist, card format) lives in [SKILL.md](SKILL.md).
@@ -66,12 +66,64 @@ MIT — see [SKILL.md](SKILL.md) frontmatter. Endpoint credit: Bambuddy wiki / P
 
 # makerworld-search（中文说明）
 
-**给任何 AI agent 用的 MakerWorld（拓竹模型社区）自然语言搜索 skill。**
+**给任何 AI agent 用的 [MakerWorld](https://makerworld.com)（拓竹模型社区）自然语言搜索 skill。**
 
-你说「找一个挂洞洞板的数据线收纳」，agent 把意图改写成中英双语关键词组 → 三站并行发现候选 → 官方 design-service 端点给每个候选补上**真实下载/点赞/收藏数**（无需 token）→ 按意图把关后给出真正对口的 3–5 个结果。
+> 说「找一个挂洞洞板的数据线收纳」或 *"find me a Monster Hunter keychain"* — agent 把你的意图改写成中英双语关键词组，发现候选模型，再通过拓竹官方 design-service 端点给每个候选补上**真实数据**（下载/点赞/收藏/官方精选），交给你一份真正对口的候选清单。
 
-MakerWorld 没有公开搜索 API，社区 skill 全是打印控制类——**模型搜索是空白赛道**。这个 skill 用「agent 语义改写 + 官方真实数据 + 意图把关」三层组合补上这个缺口。
+[架构图](docs/architecture.png)
 
-**安装**：把本目录放进你的 agent 的 skills 目录，`pip install requests ddgs`，无需任何 key 或登录。
+## 为什么做这个
 
-**合规**：官方端点只做单次元数据增强（出处见 Bambuddy wiki），不批量抓取、不代下载、不绕验证。模型文件下载需登录，skill 只给链接。
+MakerWorld 没有公开搜索 API。这个领域的社区 skill 全是打印机控制类——**模型搜索是空白赛道**。而搜索引擎只会关键词匹配——搜「挂洞洞板的数据线收纳」什么都找不到。这个 skill 同时补上两个缺口：
+
+- **L1 语义改写**（agent 自己做）：意图 → 2-4 组中英双语关键词组
+- **L2 发现层**（`search_mw.py`）：并行 `site:` 检索 makerworld.com / .cn / Printables，每层 25s 超时预算，每层失败原因可见
+- **L0 官方数据增强**（脚本内置）：每个候选的 design_id → `api.bambulab.com/v1/design-service/design/{id}`（无需 token，65 字段）→ 真实下载/点赞/收藏数、封面、tags、官方精选标记
+- **L3 意图把关**（agent 自己做）：排序结果只是候选池——agent 按你的实际意图核对标题/简介/tags 后才输出 top 3-5
+
+排序公式：`final_score = 下载 + 3×赞 + 2×藏 + 30×官方精选 + 5×启发式兜底`
+
+## 安装
+
+适配任何遵循 [Agent Skills](https://github.com/anthropics/skills) 约定的 agent（Claude Code、OpenClaw、Cursor、Hermes 等）。把本目录放进你 agent 的 skills 目录，然后：
+
+```bash
+pip install requests ddgs
+```
+
+无需 API key。无需登录。无需打印机。
+
+## 用法
+
+```bash
+# 单组关键词搜索
+python3 scripts/search_mw.py "phone stand" --limit 6
+# 中文站 / 国际站 / 开放网络兜底 / Printables
+python3 scripts/search_mw.py "手机支架" --source cn
+python3 scripts/search_mw.py "pegboard cable holder" --source intl
+python3 scripts/search_mw.py "mario pegboard" --source plain
+# 已知 URL 提取元数据
+python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
+```
+
+协议中 agent 侧的部分（L1 改写规则、L3 把关清单、卡片格式）在 [SKILL.md](SKILL.md)。
+
+## 出处与合规
+
+- design-service 端点是**未文档化的公开接口**（纯 GET，无鉴权）。逆向模式首发表于 **[Bambuddy](https://github.com/maziggy/bambuddy) wiki**（上游：Pr0zak / YASTL#51）。本项目仅将其用于**单模型单次元数据增强**——不批量抓取、不绕验证、不代下载文件。
+- 发现层用 `ddgs` 包（DuckDuckGo/Brave 后端）。国内网络 DDG 可能限流；Printables 可能不可达（墙）。管线在两种情况下都会优雅降级。
+- MakerWorld 模型下载按官方设计需登录——skill 给你链接，你自己点。
+- 社区背景：用户长期呼吁官方出 MakerWorld API（[forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)）；官方无计划。在官方 API 出现前，本 skill 是社区桥接方案。
+
+## 实测记录
+
+| 查询 | 结果 |
+|---|---|
+| SKÅDIS 数据线收纳 | 去重后 20 个，top-10 全部相关；官方精选第一名的 8.4k 下载 / 18.3k 收藏 |
+| EDC 推牌（fidget sliders） | 去重后 14 个，4 个精准命中 |
+| 马里奥 × 洞洞板 | 去重后 17 个；第一名官方精选 + 18,302 收藏 |
+| 怪物猎人钥匙扣/冰箱贴 | 5 个精准命中；L3 把关剔除 5 个高 pagerank 的跑题引流模型 |
+
+## 许可
+
+MIT — 见 [SKILL.md](SKILL.md) frontmatter。端点出处：Bambuddy wiki / Pr0zak (YASTL#51)。
