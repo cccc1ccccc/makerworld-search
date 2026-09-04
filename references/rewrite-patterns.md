@@ -2,34 +2,32 @@
 
 持续积累的「用户说法 → 检索词组」对照。每次真实使用中发现新的好模式就补进来。
 
+**v3 更新（2026-09-05）**：官方搜索 API 上线后改写心法简化——相关性排序由官方算法负责，
+关键词只管「表达准」，不再需要为 DDG 的索引缺陷做补偿（多组词并行撞召回、防限流等策略退役）。
+
 ## 已验证模式
 
 | 用户说 | 改写词组 | 实测效果 |
 |---|---|---|
-| 挂洞洞板的数据线收纳 | SKADIS cable holder / pegboard cable organizer / 洞洞板 数据线 / wall cable clip | 4组20个去重结果，前10全相关 ✅ 2026-09-02 |
-| 手机支架 | phone stand | 国际站3个真模型页 ✅ |
-| EDC玩具 | EDC fidget / 推牌 解压 / fidget slider push / 指尖玩具 | 14个去重，推牌品类4个精准命中（夹心饼干推牌/Magnetic Push Slider等）；「推牌 解压」组撞限流0结果但其余组兜住 ✅ 2026-09-02 |
-| 马里奥×宜家洞洞板配件 | mario skadis / mario pegboard / 马里奥 洞洞板 / super mario pegboard hook | 17个去重，IP×功能双约束有效；第一名「Ikea Skadis Mario NEW DESIGN」官方精选+8,443下载+18,302收藏断层第一 ✅ 2026-09-02 |
+| 手机支架 | phone stand / 手机支架 | 官方搜索 total 4652 / 中文 2855，中英混排全相关 ✅ 2026-09-05 |
+| 洞洞板数据线收纳 | SKÅDIS cable holder / 洞洞板 数据线 收纳 | total 1473，SKÅDIS 收纳前排全对口 ✅ 2026-09-05 |
+| EDC推牌 | 推牌 / EDC fidget / fidget slider | 「推牌」单关键词 total 1706，前5全中文推牌真模型（GAME BOY EDC 磁力推牌 3199下载等）✅ 2026-09-05 |
+| 怪物猎人钥匙扣 | monster hunter keychain | 第一名官方精选 Palico 钥匙扣，v2 时代的跑题引流模型消失 ✅ 2026-09-05 |
 
-## 复合查询改写心法（马里奥案例沉淀）
+## 复合查询改写心法
 
-- **IP×功能双约束**：IP词(马里奥/mario)和平台词(洞洞板/SKADIS/pegboard)必须同组出现，单独搜IP会漂移
-- **IP配件是大类**：mario pegboard / mario hook / mario shelf 都有真实爆款，IP×洞洞板是MakerWorld成熟品类
-- **警惕标题漂移**：作者改标题后DDG残留旧索引（Kakashi/McLaren混入马里奥结果），L3必须核对标题相符度
+- **IP×功能同组**：IP词(马里奥/mario)和平台词(洞洞板/SKADIS/pegboard)必须同组出现，单独搜IP会漂移
+- **品类黑话直译 > 泛词**：推牌=push slider、指尖陀螺=spinner、磁推=magnetic push
+- **中文关键词原生可用**：官方搜索中文直达，不再需要「中文站配中文词」的站别对齐
+- **专名 > 通名**：「SKÅDIS」比「洞洞板」召回更准；「3030型材」不要写成「铝型材」
 
-## EDC场景改写心法（从实测沉淀）
+## 官方搜索时代的心法（替代旧 DDG 心法）
 
-- EDC是国际站强品类：`EDC fidget`/`fidget slider`/`push slider` 英文词召回远好于中文
-- 推牌=push slider/slider，指尖陀螺=spinner，磁推=magnetic push——**品类黑话直译比泛词强**
-- 「解压」在中文站是高频tag词，但DDG中文索引不稳定，别单押
-
-## 改写心法（从实测沉淀）
-
-1. **专名 > 通名**：「SKÅDIS/宜家洞洞板」比「洞洞板」召回更准；「3030型材」不要写成「铝型材」
-2. **中文站吃中文词，国际站吃英文词**：`--source cn` 配中文词组、`intl` 配英文词组，auto时全出
-3. **DDG慢是常态**：三层并行后端到端 ~20s；中文层偶发0结果多为同IP限流（多组词间天然间隔可缓解）。每组词用 `--limit 4` 控制量，别贪多
-4. **结果<2个时的升级路径**：换同义词再试一轮 → 仍无 → 建议生成兜底（generate.py）
-5. **Printables API字段最全**（封面图/下载数/点赞数都有），但内容偏Prusa生态，作为MakerWorld的补集而非替代
+1. **单关键词即可发查**：相关性算法强，先发一组看 total 和前几名，不相关再换词——不需要预先铺4组词
+2. **结果<2个时**：换同义词（holder↔clip↔organizer↔mount↔stand）再试一轮 → 仍无 → 生成兜底（generate.py）
+3. **`--order downloads` 找爆款，默认 score 找对口**：冷门品类用 downloads 排序常有惊喜
+4. **多语言标题混排是常态**：中文查询也会命中英文模型（反之亦然），L3 按意图筛，不按语言筛
+5. **Printables 仍作跨站补充**（auto 模式自动带上）：Prusa 生态内容，字段全，可达时有效
 
 ## 待验证场景（遇到后补录）
 

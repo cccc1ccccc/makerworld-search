@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>makerworld-search · 架构</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --paper:  #2d3142; --ink: #f5f5f5; --muted: #bfc0c0;
+    --accent: #f08a59; --link: #6a95d8;
+    --sans: 'Geist', system-ui, sans-serif;
+    --serif: 'Instrument Serif', serif;
+    --mono: 'Geist Mono', ui-monospace, monospace;
+  }
+  body { font-family: var(--sans); background: var(--paper); color: var(--ink);
+         min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         padding: 3rem 2rem; }
+  .frame { max-width: 1160px; width: 100%; }
+  .eyebrow { font-family: var(--mono); font-size: 0.66rem; font-weight: 500;
+             letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
+             margin-bottom: 0.5rem; }
+  h1 { font-family: var(--serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400; letter-spacing: -0.02em; line-height: 1.15; color: var(--ink);
+      margin-bottom: 0.75rem; }
+  .subtitle { font-family: var(--sans); font-size: 0.85rem; color: var(--muted);
+              margin-bottom: 1.75rem; }
+  .subtitle .sep { color: rgba(245,245,245,0.25); margin: 0 0.4rem; }
+  svg { width: 100%; min-width: 900px; display: block; }
+  .cards { display: grid; grid-template-columns: 1.1fr 1fr 0.95fr; gap: 1rem; margin-top: 1.75rem; }
+  .card { background: rgba(245,245,245,0.045); border: 1px solid rgba(245,245,245,0.12);
+          border-radius: 6px; padding: 1.25rem; }
+  .card .eyebrow { margin-bottom: 0.6rem; letter-spacing: 0.14em; }
+  .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+  .card-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot-coral { background: var(--accent); } .dot-link { background: var(--link); } .dot-muted { background: var(--muted); }
+  .card h3 { font-size: 0.95rem; font-weight: 600; }
+  .card p { font-size: 0.8rem; line-height: 1.55; color: var(--muted); }
+  footer { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid rgba(245,245,245,0.10);
+           font-family: var(--mono); font-size: 0.62rem; color: rgba(245,245,245,0.35);
+           letter-spacing: 0.04em; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="frame">
+  <p class="eyebrow">MAKERWORLD-SEARCH · SKILL ARCHITECTURE · V0.5.0</p>
+  <h1>MakerWorld 语义搜索 — 官方搜索 API 四层管线</h1>
+  <p class="subtitle">L1 意图改写<span class="sep">→</span>L2 官方搜索 API<span class="sep">→</span>L2b 简介补全<span class="sep">→</span>L3 意图把关<span class="sep">｜</span>端到端约 2 秒 · 无搜索引擎依赖</p>
+
+  <svg viewBox="0 0 1000 780" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mwsearch-arch-title mwsearch-arch-desc">
+    <title id="mwsearch-arch-title">makerworld-search skill architecture</title>
+    <desc id="mwsearch-arch-desc">v3 官方 API 检索管线架构：Agent 语义改写、脚本调用 Bambu 官方 search-service 搜索 API（相关性排序+真实数据一体返回）、design-service 简介补全、Agent 意图把关后输出结果卡片；含 Printables 跨站补集与生成兜底两条条件路径，全程无搜索引擎依赖。</desc>
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+      <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+      <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6a95d8"/></marker>
+    </defs>
+
+    <rect width="100%" height="100%" fill="#2d3142"/>
+
+    <!-- ═══ zones (painted first) ═══ -->
+    <rect x="180" y="124" width="640" height="96" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.10)" stroke-width="0.8"/>
+    <rect x="196" y="128" width="64" height="12" rx="2" fill="#2d3142"/>
+    <text x="228" y="137" fill="rgba(245,245,245,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">AGENT 层</text>
+
+    <rect x="240" y="252" width="520" height="272" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.10)" stroke-width="0.8"/>
+    <rect x="256" y="256" width="128" height="12" rx="2" fill="#2d3142"/>
+    <text x="320" y="265" fill="rgba(245,245,245,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">SCRIPT · search_mw.py</text>
+
+    <rect x="180" y="556" width="640" height="112" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.10)" stroke-width="0.8"/>
+    <rect x="196" y="560" width="64" height="12" rx="2" fill="#2d3142"/>
+    <text x="228" y="569" fill="rgba(245,245,245,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">AGENT 层</text>
+
+    <!-- ═══ arrows (before nodes) ═══ -->
+    <!-- 用户 → L1 -->
+    <line x1="500" y1="88" x2="500" y2="156" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+    <!-- L1 → L2 -->
+    <line x1="500" y1="212" x2="500" y2="292" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+    <rect x="512" y="236" width="104" height="12" rx="2" fill="#2d3142"/>
+    <text x="564" y="244" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">中英关键词 ×1-2 组</text>
+    <!-- search API → L2 -->
+    <line x1="800" y1="316" x2="660" y2="316" stroke="#6a95d8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+    <rect x="664" y="296" width="128" height="12" rx="2" fill="#2d3142"/>
+    <text x="728" y="304" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">hits·真实数据·无token</text>
+    <!-- printables → L2 (dashed optional) -->
+    <line x1="200" y1="316" x2="340" y2="316" stroke="#6a95d8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-link)"/>
+    <rect x="216" y="296" width="96" height="12" rx="2" fill="#2d3142"/>
+    <text x="264" y="304" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">跨站补集 · auto 可选</text>
+    <!-- L2 → L2b -->
+    <line x1="500" y1="356" x2="500" y2="428" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+    <rect x="512" y="384" width="88" height="12" rx="2" fill="#2d3142"/>
+    <text x="556" y="392" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">top-N design_id</text>
+    <!-- design API → L2b -->
+    <line x1="800" y1="464" x2="660" y2="464" stroke="#6a95d8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+    <rect x="664" y="444" width="128" height="12" rx="2" fill="#2d3142"/>
+    <text x="728" y="452" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">summary·≤N 次轻量</text>
+    <!-- L2b → L3 -->
+    <line x1="500" y1="492" x2="500" y2="588" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+    <rect x="512" y="532" width="96" height="12" rx="2" fill="#2d3142"/>
+    <text x="560" y="540" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">官方排序候选池</text>
+    <!-- L3 → generate (dashed conditional) -->
+    <line x1="700" y1="620" x2="851" y2="620" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+    <rect x="744" y="600" width="64" height="12" rx="2" fill="#2d3142"/>
+    <text x="776" y="608" fill="rgba(245,245,245,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">结果&lt;2时</text>
+
+    <!-- ═══ nodes ═══ -->
+    <!-- 用户需求 -->
+    <rect x="380" y="32" width="240" height="56" rx="6" fill="#2d3142"/>
+    <rect x="380" y="32" width="240" height="56" rx="6" fill="rgba(191,192,192,0.10)" stroke="rgba(245,245,245,0.30)" stroke-width="1"/>
+    <rect x="388" y="38" width="36" height="12" rx="2" fill="transparent" stroke="rgba(191,192,192,0.40)" stroke-width="0.8"/>
+    <text x="406" y="47" fill="rgba(245,245,245,0.75)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">USER</text>
+    <text x="500" y="62" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">用户需求</text>
+    <text x="500" y="78" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">自然语言 · 一句话</text>
+
+    <!-- L1 语义改写 -->
+    <rect x="360" y="156" width="280" height="56" rx="6" fill="#2d3142"/>
+    <rect x="360" y="156" width="280" height="56" rx="6" fill="rgba(191,192,192,0.10)" stroke="rgba(245,245,245,0.30)" stroke-width="1"/>
+    <rect x="368" y="162" width="44" height="12" rx="2" fill="transparent" stroke="rgba(191,192,192,0.40)" stroke-width="0.8"/>
+    <text x="390" y="171" fill="rgba(245,245,245,0.75)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AGENT</text>
+    <text x="500" y="186" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">L1 语义改写</text>
+    <text x="500" y="202" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">意图 → 中英双语关键词 · 专名优先</text>
+
+    <!-- L2 官方搜索 API (coral focal — the core) -->
+    <rect x="340" y="292" width="320" height="64" rx="6" fill="#2d3142"/>
+    <rect x="340" y="292" width="320" height="64" rx="6" fill="rgba(240,138,89,0.14)" stroke="#f08a59" stroke-width="1.2"/>
+    <rect x="348" y="298" width="24" height="12" rx="2" fill="transparent" stroke="rgba(240,138,89,0.50)" stroke-width="0.8"/>
+    <text x="360" y="307" fill="#f08a59" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">L2</text>
+    <text x="500" y="326" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">L2 官方搜索 API</text>
+    <text x="500" y="342" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">select/design2 · 相关性排序 · ~0.6s</text>
+
+    <!-- L2b 简介补全 -->
+    <rect x="340" y="428" width="320" height="64" rx="6" fill="#2d3142"/>
+    <rect x="340" y="428" width="320" height="64" rx="6" fill="#3a4056" stroke="rgba(245,245,245,0.40)" stroke-width="1"/>
+    <rect x="348" y="434" width="36" height="12" rx="2" fill="transparent" stroke="rgba(245,245,245,0.35)" stroke-width="0.8"/>
+    <text x="366" y="443" fill="rgba(245,245,245,0.75)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">L2b</text>
+    <text x="500" y="462" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">L2b 简介补全</text>
+    <text x="500" y="478" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">design-service · 只补 desc 不覆盖 title</text>
+
+    <!-- L3 意图把关 -->
+    <rect x="300" y="588" width="400" height="64" rx="6" fill="#2d3142"/>
+    <rect x="300" y="588" width="400" height="64" rx="6" fill="rgba(191,192,192,0.10)" stroke="rgba(245,245,245,0.30)" stroke-width="1"/>
+    <rect x="308" y="594" width="44" height="12" rx="2" fill="transparent" stroke="rgba(191,192,192,0.40)" stroke-width="0.8"/>
+    <text x="330" y="603" fill="rgba(245,245,245,0.75)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AGENT</text>
+    <text x="500" y="622" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">L3 意图把关 + 结果卡片</text>
+    <text x="500" y="638" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">逐条核对标题/简介/tags 相符度 → top 3-5</text>
+
+    <!-- Printables GraphQL (external, optional complement) -->
+    <rect x="24" y="284" width="176" height="64" rx="6" fill="#2d3142"/>
+    <rect x="24" y="284" width="176" height="64" rx="6" fill="rgba(245,245,245,0.03)" stroke="rgba(245,245,245,0.30)" stroke-width="1" stroke-dasharray="4,3"/>
+    <rect x="32" y="290" width="32" height="12" rx="2" fill="transparent" stroke="rgba(245,245,245,0.20)" stroke-width="0.8"/>
+    <text x="48" y="299" fill="rgba(245,245,245,0.60)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+    <text x="112" y="318" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Printables GraphQL</text>
+    <text x="112" y="334" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">公开 API · Prusa 生态补集</text>
+
+    <!-- search-service API (external, coral stroke = primary integration point) -->
+    <rect x="800" y="284" width="176" height="64" rx="6" fill="#2d3142"/>
+    <rect x="800" y="284" width="176" height="64" rx="6" fill="rgba(245,245,245,0.03)" stroke="#f08a59" stroke-width="1.2"/>
+    <rect x="808" y="290" width="56" height="12" rx="2" fill="transparent" stroke="rgba(240,138,89,0.50)" stroke-width="0.8"/>
+    <text x="836" y="299" fill="#f08a59" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OFFICIAL</text>
+    <text x="888" y="318" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">search-service API</text>
+    <text x="888" y="334" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">api.bambulab.com · 无 token</text>
+
+    <!-- design-service API (external, secondary official) -->
+    <rect x="800" y="436" width="176" height="64" rx="6" fill="#2d3142"/>
+    <rect x="800" y="436" width="176" height="64" rx="6" fill="rgba(245,245,245,0.03)" stroke="#f08a59" stroke-width="1"/>
+    <rect x="808" y="442" width="56" height="12" rx="2" fill="transparent" stroke="rgba(240,138,89,0.50)" stroke-width="0.8"/>
+    <text x="836" y="451" fill="#f08a59" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OFFICIAL</text>
+    <text x="888" y="470" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">design-service API</text>
+    <text x="888" y="486" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">api.bambulab.com · 无 token</text>
+
+    <!-- generate (dashed fallback) -->
+    <rect x="852" y="588" width="132" height="64" rx="6" fill="#2d3142"/>
+    <rect x="852" y="588" width="132" height="64" rx="6" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+    <rect x="860" y="594" width="56" height="12" rx="2" fill="transparent" stroke="rgba(245,245,245,0.20)" stroke-width="0.8"/>
+    <text x="888" y="603" fill="rgba(245,245,245,0.60)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">FALLBACK</text>
+    <text x="918" y="622" fill="#f5f5f5" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">generate 生成兜底</text>
+    <text x="918" y="638" fill="#bfc0c0" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Tripo / Meshy 文生3D</text>
+
+    <!-- ═══ legend (horizontal bottom strip) ═══ -->
+    <line x1="140" y1="704" x2="860" y2="704" stroke="rgba(245,245,245,0.10)" stroke-width="0.8"/>
+    <text x="140" y="724" fill="rgba(245,245,245,0.40)" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+
+    <rect x="232" y="716" width="16" height="12" rx="2" fill="rgba(240,138,89,0.14)" stroke="#f08a59" stroke-width="1"/>
+    <text x="256" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">官方搜索核心</text>
+
+    <rect x="340" y="716" width="16" height="12" rx="2" fill="rgba(191,192,192,0.10)" stroke="rgba(245,245,245,0.30)" stroke-width="1"/>
+    <text x="364" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">智能体层</text>
+
+    <rect x="436" y="716" width="16" height="12" rx="2" fill="#3a4056" stroke="rgba(245,245,245,0.40)" stroke-width="1"/>
+    <text x="460" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">脚本层</text>
+
+    <rect x="516" y="716" width="16" height="12" rx="2" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="540" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">兜底路径</text>
+
+    <rect x="612" y="716" width="16" height="12" rx="2" fill="rgba(245,245,245,0.03)" stroke="rgba(245,245,245,0.30)" stroke-width="1"/>
+    <text x="636" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">外部服务</text>
+
+    <line x1="708" y1="720" x2="732" y2="720" stroke="#6a95d8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+    <text x="744" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">官方 API 调用</text>
+
+    <line x1="836" y1="720" x2="860" y2="720" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+    <text x="872" y="724" fill="#bfc0c0" font-size="8" font-family="'Geist Mono', monospace">条件兜底</text>
+  </svg>
+
+  <div class="cards">
+    <div class="card">
+      <p class="eyebrow">L2 · OFFICIAL SEARCH</p>
+      <div class="card-header"><span class="card-dot dot-coral"></span><h3>官方搜索 API 直查</h3></div>
+      <p>search-service select/design2 无需 token：Bambu 自家相关性排序，每条 hit 自带真实下载/点赞/收藏/封面/tags/官方精选；中文关键词原生支持（「推牌」1706 匹配），无 Cloudflare 墙、无限流担忧。</p>
+    </div>
+    <div class="card">
+      <p class="eyebrow">L2b · SUMMARY FILL</p>
+      <div class="card-header"><span class="card-dot dot-link"></span><h3>轻量补全 · 不抢排序</h3></div>
+      <p>design-service 只为 top-N 补简介文本（≤ limit 次调用，绝不批量）；title 保留原语言防机翻覆盖。Printables GraphQL 作跨站补集，墙内 8s 快速失败不影响主流程。</p>
+    </div>
+    <div class="card">
+      <p class="eyebrow">L1 + L3 · AGENT</p>
+      <div class="card-header"><span class="card-dot dot-muted"></span><h3>Agent 双端把关</h3></div>
+      <p>入口：把「挂洞洞板的数据线收纳」改写成中英关键词（专名&gt;通名：SKÅDIS/M3/2020型材）；出口：逐条核对标题/简介/tags 相符度——官方排序只是候选池，agent 做最终裁决。</p>
+    </div>
+  </div>
+
+  <footer>makerworld-search v0.5.0 · 2026-09-05 · 搜索层: api.bambulab.com/v1/search-service/select/design2 · 补全层: /v1/design-service/design/{id} (undocumented public · credit: Bambuddy wiki / Pr0zak YASTL#51 + Doridian/OpenBambuAPI) · 无搜索引擎依赖 · MIT License</footer>
+</div>
+</body>
+</html>

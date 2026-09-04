@@ -1,43 +1,45 @@
 # makerworld-search
 
 <p align="center">
-  <img src="docs/architecture.png" alt="makerworld-search architecture: L1 intent rewrite → L2 DDG discovery → L0 official design-service enrichment → L3 intent gatekeeping" width="620">
+  <img src="docs/architecture.png" alt="makerworld-search architecture: L1 intent rewrite → L2 official search-service API → L2b summary fill → L3 intent gatekeeping" width="620">
 </p>
 
 **A natural-language semantic search skill for [MakerWorld](https://makerworld.com) (Bambu Lab's 3D-print model community) — for any AI agent.**
 
-> Say *"find me a pegboard cable holder"* or *"搜一个怪物猎人冰箱贴"* — the agent rewrites your intent into bilingual keyword groups, discovers candidate models, enriches every candidate with **real official data** (downloads / likes / collections / staff-pick) via Bambu's design-service endpoint, and hands you a shortlist that actually matches what you meant.
+> Say *"find me a pegboard cable holder"* or *“搜一个怪物猎人冰箱贴”* — the agent rewrites your intent into bilingual keyword groups, queries **Bambu's official search API** (no token, no login), and hands you a shortlist ranked by Bambu's own relevance algorithm with **real official data** (downloads / likes / collections / staff-pick) on every result.
 
 ## Why
 
-MakerWorld has no public search API. Community skills in this space are all printer-control; **model search is a 0-competitor niche**. Meanwhile, search engines only keyword-match — *"挂洞洞板的数据线收纳"* finds nothing. This skill closes both gaps:
+MakerWorld has no *documented* public API — but its production search backend is a plain, unauthenticated JSON endpoint. Community skills in this space are all printer-control; **model search is a 0-competitor niche**. Meanwhile, search engines only keyword-match — *“挂洞洞板的数据线收纳”* finds nothing. This skill closes both gaps on fully official data:
 
-- **L1 semantic rewrite** (the agent itself): intent → 2–4 bilingual keyword groups
-- **L2 discovery** (`search_mw.py`): parallel `site:` search across makerworld.com / .cn / Printables, 25s budget per layer, visible per-layer errors
-- **L0 official enrichment** (built-in): every candidate's design_id → `api.bambulab.com/v1/design-service/design/{id}` (no token, 65 fields) → real download/like/collection counts, cover, tags, staff-pick flag
-- **L3 intent gatekeeping** (the agent again): ranking is a candidate pool — the agent checks title/summary/tags against your actual intent before showing top 3–5
+- **L1 semantic rewrite** (the agent itself): intent → 1–2 bilingual keyword groups (proper nouns beat generic terms: SKÅDIS, 2020 extrusion, M3)
+- **L2 official search** (`search_mw.py`): `GET api.bambulab.com/v1/search-service/select/design2?keyword=…` — no token, ~0.6s, every hit already carries real download/like/collection counts, cover, tags, staff-pick flag, ranked by Bambu's own relevance algorithm (switchable to `--order downloads/hot/new/boosts`)
+- **L2b summary fill** (built-in): top-N results get their description text via the design-service metadata endpoint — kept light (≤ limit calls), never batch
+- **L3 intent gatekeeping** (the agent again): the agent checks title/summary/tags against your actual intent before showing top 3–5
 
-Ranking formula: `final_score = downloads + 3×likes + 2×collections + 30×staff_pick + 5×heuristic`
+Chinese keywords work natively — “推牌” returns 1,706 matches with the real Chinese fidget-slider models on top.
 
 ## Install
 
 Works with any agent that reads the [Agent Skills](https://github.com/anthropics/skills) convention (Claude Code, OpenClaw, Cursor, Hermes, …). Drop the folder into your agent's skills directory, then:
 
 ```bash
-pip install requests ddgs
+pip install requests
 ```
 
-No API keys. No login. No hardware required.
+No API keys. No login. No hardware required. No search-engine dependencies.
 
 ## Usage
 
 ```bash
-# single keyword group
+# single keyword search (default: official relevance ranking)
 python3 scripts/search_mw.py "phone stand" --limit 6
-# Chinese site / international site / open-web rescue / Printables
-python3 scripts/search_mw.py "手机支架" --source cn
-python3 scripts/search_mw.py "pegboard cable holder" --source intl
-python3 scripts/search_mw.py "mario pegboard" --source plain
+# sort by downloads / trending / newest / boost tokens
+python3 scripts/search_mw.py "phone stand" --order downloads
+# Chinese keywords work natively
+python3 scripts/search_mw.py "推牌" --limit 6
+# MakerWorld only (skip the Printables complement layer)
+python3 scripts/search_mw.py "手机支架" --source intl
 # metadata for one known URL
 python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
 ```
@@ -46,23 +48,26 @@ The agent side of the protocol (L1 rewrite rules, L3 gatekeeping checklist, card
 
 ## Provenance & compliance
 
-- The design-service endpoint is **undocumented but public** (plain GET, no auth). Reverse-engineering pattern first published by the **[Bambuddy](https://github.com/maziggy/bambuddy) wiki** (upstream credit: Pr0zak / YASTL#51). This project uses it for **single-call-per-design metadata enrichment only** — no batch scraping, no auth bypass, no file downloads.
-- Discovery uses the `ddgs` package (DuckDuckGo/Brave backends). On CN networks DDG may rate-limit; Printables may be unreachable (GFW). The pipeline degrades gracefully either way.
+- Both endpoints (`search-service` search, `design-service` metadata) are **undocumented but public** (plain GET, no auth) — the same `v1/*-service` microservice family. Reverse-engineering pattern first published by the **[Bambuddy](https://github.com/maziggy/bambuddy) wiki** (upstream credit: Pr0zak / YASTL#51); the Search Service endpoint table is cross-referenced in **[Doridian/OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)** `cloud-http.md`.
+- Usage posture: one search call per keyword group + ≤ limit metadata calls per query. No batch scraping, no auth bypass, no file downloads.
+- The optional Printables complement layer uses Printables' public GraphQL API; on CN networks it is often unreachable (GFW) and fails fast (~8s) without affecting the main flow.
 - MakerWorld model downloads require login by design — this skill gives you the link; you click it.
-- Community context: users have long requested an official MakerWorld API ([forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)); none is planned. This skill is a community bridge until one exists.
+- Community context: users have long requested an official MakerWorld API ([forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)); no documented API is planned. This skill wraps the *production* endpoints the official apps use — a community bridge until Bambu documents them.
 
 ## Verified runs
 
 | Query | Result |
 |---|---|
-| SKÅDIS cable holder | 20 deduped, top-10 all relevant; staff-pick winner 8.4k dl / 18.3k collections |
-| EDC 推牌 (fidget sliders) | 14 deduped, 4 precision hits |
-| Mario × pegboard | 17 deduped; top hit staff-pick + 18,302 collections |
-| Monster Hunter keychain/magnet | 5 precision hits; L3 gatekeeping dropped 5 off-topic high-pagerank decoys |
+| “phone stand” | 4,652 matches; top hit 37.5k dl / 5k likes, matches web UI page 1 |
+| “推牌” (fidget sliders) | 1,706 matches; real Chinese fidget-slider models on top (GAME BOY EDC 3.2k dl) |
+| “洞洞板 数据线 收纳” (SKÅDIS cable mgmt) | 1,473 matches, SKÅDIS organizers on top |
+| Monster Hunter keychain | staff-pick Palico keychain #1; no off-topic decoys (v1's DDG layer used to surface 5) |
+
+v3 (official search API) is also ~10× faster end-to-end than the v2 DuckDuckGo-discovery pipeline it replaced (~2s vs ~24s).
 
 ## License
 
-MIT — see [SKILL.md](SKILL.md) frontmatter. Endpoint credit: Bambuddy wiki / Pr0zak (YASTL#51).
+MIT — see [SKILL.md](SKILL.md) frontmatter. Endpoint credit: Bambuddy wiki / Pr0zak (YASTL#51) + Doridian/OpenBambuAPI.
 
 ---
 
@@ -70,39 +75,41 @@ MIT — see [SKILL.md](SKILL.md) frontmatter. Endpoint credit: Bambuddy wiki / P
 
 **给任何 AI agent 用的 [MakerWorld](https://makerworld.com)（拓竹模型社区）自然语言搜索 skill。**
 
-> 说「找一个挂洞洞板的数据线收纳」或 *"find me a Monster Hunter keychain"* — agent 把你的意图改写成中英双语关键词组，发现候选模型，再通过拓竹官方 design-service 端点给每个候选补上**真实数据**（下载/点赞/收藏/官方精选），交给你一份真正对口的候选清单。
+> 说「找一个挂洞洞板的数据线收纳」或 *"find me a Monster Hunter keychain"* — agent 把你的意图改写成中英双语关键词组，直接查**拓竹官方搜索 API**（无需 token、无需登录），交给你一份按官方相关性算法排序、每条都带**真实官方数据**（下载/点赞/收藏/官方精选）的候选清单。
 
 ## 为什么做这个
 
-MakerWorld 没有公开搜索 API。这个领域的社区 skill 全是打印机控制类——**模型搜索是空白赛道**。而搜索引擎只会关键词匹配——搜「挂洞洞板的数据线收纳」什么都找不到。这个 skill 同时补上两个缺口：
+MakerWorld 没有*文档化*的公开 API——但它的生产搜索后端就是一个无需鉴权的 JSON 端点。这个领域的社区 skill 全是打印机控制类——**模型搜索是空白赛道**。而搜索引擎只会关键词匹配——搜「挂洞洞板的数据线收纳」什么都找不到。这个 skill 在纯官方数据上同时补上两个缺口：
 
-- **L1 语义改写**（agent 自己做）：意图 → 2-4 组中英双语关键词组
-- **L2 发现层**（`search_mw.py`）：并行 `site:` 检索 makerworld.com / .cn / Printables，每层 25s 超时预算，每层失败原因可见
-- **L0 官方数据增强**（脚本内置）：每个候选的 design_id → `api.bambulab.com/v1/design-service/design/{id}`（无需 token，65 字段）→ 真实下载/点赞/收藏数、封面、tags、官方精选标记
-- **L3 意图把关**（agent 自己做）：排序结果只是候选池——agent 按你的实际意图核对标题/简介/tags 后才输出 top 3-5
+- **L1 语义改写**（agent 自己做）：意图 → 1-2 组中英双语关键词（专名优于通名：SKÅDIS、2020型材、M3）
+- **L2 官方搜索**（`search_mw.py`）：`GET api.bambulab.com/v1/search-service/select/design2?keyword=…` — 无需 token，~0.6s，每条结果自带真实下载数/点赞/收藏 + 封面 + tags + 官方精选标记，按官方相关性算法排序（可切 `--order downloads/hot/new/boosts`）
+- **L2b 简介补全**（脚本内置）：top-N 结果经 design-service 元数据端点补描述文本——轻量调用（≤ limit 次），绝不批量抓取
+- **L3 意图把关**（agent 自己做）：agent 按你的实际意图核对标题/简介/tags 后才输出 top 3-5
 
-排序公式：`final_score = 下载 + 3×赞 + 2×藏 + 30×官方精选 + 5×启发式兜底`
+中文关键词原生支持——「推牌」直接返回 1706 个匹配，前排就是真实的中文推牌模型。
 
 ## 安装
 
 适配任何遵循 [Agent Skills](https://github.com/anthropics/skills) 约定的 agent（Claude Code、OpenClaw、Cursor、Hermes 等）。把本目录放进你 agent 的 skills 目录，然后：
 
 ```bash
-pip install requests ddgs
+pip install requests
 ```
 
-无需 API key。无需登录。无需打印机。
+无需 API key。无需登录。无需打印机。无搜索引擎依赖。
 
 ## 用法
 
 ```bash
-# 单组关键词搜索
+# 单关键词搜索（默认官方相关性排序）
 python3 scripts/search_mw.py "phone stand" --limit 6
-# 中文站 / 国际站 / 开放网络兜底 / Printables
-python3 scripts/search_mw.py "手机支架" --source cn
-python3 scripts/search_mw.py "pegboard cable holder" --source intl
-python3 scripts/search_mw.py "mario pegboard" --source plain
-# 已知 URL 提取元数据
+# 按下载量/热度/最新/Boost 排序
+python3 scripts/search_mw.py "phone stand" --order downloads
+# 中文关键词原生可用
+python3 scripts/search_mw.py "推牌" --limit 6
+# 只查 MakerWorld（跳过 Printables 补充层）
+python3 scripts/search_mw.py "手机支架" --source intl
+# 已知 URL 提取官方元数据
 python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
 ```
 
@@ -110,20 +117,23 @@ python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-pho
 
 ## 出处与合规
 
-- design-service 端点是**未文档化的公开接口**（纯 GET，无鉴权）。逆向模式首发表于 **[Bambuddy](https://github.com/maziggy/bambuddy) wiki**（上游：Pr0zak / YASTL#51）。本项目仅将其用于**单模型单次元数据增强**——不批量抓取、不绕验证、不代下载文件。
-- 发现层用 `ddgs` 包（DuckDuckGo/Brave 后端）。国内网络 DDG 可能限流；Printables 可能不可达（墙）。管线在两种情况下都会优雅降级。
+- 两个端点（search-service 搜索、design-service 元数据）均为**未文档化的公开接口**（纯 GET，无鉴权）——同一 `v1/*-service` 微服务族。逆向模式首发表于 **[Bambuddy](https://github.com/maziggy/bambuddy) wiki**（上游：Pr0zak / YASTL#51）；Search Service 端点表交叉引用自 **[Doridian/OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)** 的 `cloud-http.md`。
+- 使用姿态：每关键词组一次搜索 + 每查询 ≤ limit 次元数据调用。不批量抓取、不绕验证、不代下载文件。
+- 可选的 Printables 补充层用其公开 GraphQL API；国内网络常不可达（墙），8s 快速失败不影响主流程。
 - MakerWorld 模型下载按官方设计需登录——skill 给你链接，你自己点。
-- 社区背景：用户长期呼吁官方出 MakerWorld API（[forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)）；官方无计划。在官方 API 出现前，本 skill 是社区桥接方案。
+- 社区背景：用户长期呼吁官方出 MakerWorld API（[forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)）；官方无文档化计划。本 skill 封装的是官方 App 正在使用的*生产端点*——在拓竹文档化之前，这是社区桥接方案。
 
 ## 实测记录
 
 | 查询 | 结果 |
 |---|---|
-| SKÅDIS 数据线收纳 | 去重后 20 个，top-10 全部相关；官方精选第一名的 8.4k 下载 / 18.3k 收藏 |
-| EDC 推牌（fidget sliders） | 去重后 14 个，4 个精准命中 |
-| 马里奥 × 洞洞板 | 去重后 17 个；第一名官方精选 + 18,302 收藏 |
-| 怪物猎人钥匙扣/冰箱贴 | 5 个精准命中；L3 把关剔除 5 个高 pagerank 的跑题引流模型 |
+| “phone stand” | 4,652 匹配；第一名 37.5k 下载 / 5k 赞，与网页版第一页一致 |
+| 「推牌」 | 1,706 匹配；前排全中文推牌真模型（GAME BOY EDC 磁力推牌 3.2k 下载） |
+| 「洞洞板 数据线 收纳」 | 1,473 匹配，SKÅDIS 收纳前排 |
+| 怪物猎人钥匙扣 | 官方精选 Palico 钥匙排第一；零跑题引流（v1 DDG 时代会混入 5 个） |
+
+v3（官方搜索 API）端到端也比 v2 的 DuckDuckGo 发现管线快约一个量级（~2s vs ~24s）。
 
 ## 许可
 
-MIT — 见 [SKILL.md](SKILL.md) frontmatter。端点出处：Bambuddy wiki / Pr0zak (YASTL#51)。
+MIT — 见 [SKILL.md](SKILL.md) frontmatter。端点出处：Bambuddy wiki / Pr0zak（YASTL#51）+ Doridian/OpenBambuAPI。

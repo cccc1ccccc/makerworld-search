@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-makerworld-search — v2 pipeline: ddgs discovery + official design-service enrichment.
+makerworld-search — v3 pipeline: official search-service API + design-service enrichment.
 
 Usage:
-  python3 search_mw.py "phone stand" [--source auto|cn|intl|printables|plain] [--limit 6]
+  python3 search_mw.py "phone stand" [--source auto|cn|intl|printables] [--limit 6] [--order score]
   python3 search_mw.py --meta "https://makerworld.com/en/models/717070-phone-stand"
 
-Architecture (v2, parallel): discovery via ddgs site: search (cn/intl/printables
-layers run in parallel threads, each with its own time budget), then every
-MakerWorld candidate is enriched via the official design-service API (real
-download/like/collect counts, no token). Heuristic signals only rank results
-that got no official data. `--source plain` = open-web search (no site:
-filter) keeping only model-page links — rescue layer for cold-start queries.
+Architecture (v3): keyword search hits Bambu's official search-service
+(`GET /v1/search-service/select/design2`) — no token, real relevance ranking by
+Bambu's own algorithm, every hit already carries real download/like/collection
+counts, cover, tags, staff-pick flag. The design-service metadata endpoint
+(`GET /v1/design-service/design/{id}`) is kept as a light second pass to add
+summary text (search hits carry no description) + translated title.
+
+v3 removed the DDG discovery layer entirely — the official search API makes it
+obsolete: better relevance, zero rate-limits-against-us, no Cloudflare wall,
+and it works for Chinese keywords natively.
+
 Output: JSON to stdout (agent consumes and renders L3 cards).
 """
 
 import argparse
+import html as _html
 import json
 import re
 import sys
@@ -24,35 +30,125 @@ from urllib.parse import urlparse
 
 import requests
 
-try:
-    from ddgs import DDGS
-    DDGS_AVAILABLE = True
-except ImportError:
-    DDGS_AVAILABLE = False
-
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/128 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
-SITE_CN = "makerworld.com.cn"
-SITE_INTL = "makerworld.com"
-MW_URL_RE = re.compile(r"makerworld\.com(?:\.cn)?/(?:[a-z-]+/)?models/(\d+)-?([^/?#]*)")
-PRINTABLES_URL_RE = re.compile(r"printables\.com/model/(\d+)")
-
-# Official (undocumented but public) Bambu design-service endpoint — reverse-engineered
-# pattern documented by Bambuddy wiki (upstream credit: Pr0zak/YASTL#51).
-# Returns 65 fields incl. real downloadCount/likeCount/collectionCount + coverUrl.
+# Official (undocumented but public) Bambu endpoints — same `v1/*-service`
+# microservice family. Reverse-engineering pattern documented by the Bambuddy
+# wiki (upstream credit: Pr0zak/YASTL#51); endpoint list cross-referenced with
+# Doridian/OpenBambuAPI cloud-http.md (Search Service table).
+SEARCH_API = "https://api.bambulab.com/v1/search-service/select/design2"
 DESIGN_API = "https://api.bambulab.com/v1/design-service/design/{design_id}"
+PRINTABLES_URL_RE = re.compile(r"printables\.com/model/(\d+)")
+MW_URL_RE = re.compile(r"makerworld\.com(?:\.cn)?/(?:[a-z-]+/)?models/(\d+)-?([^/?#]*)")
+
+# orderBy values verified live (2026-09-05): score (default relevance),
+# hotScore, downloadCount, likeCount, newUploads, boosts.
+ORDER_BY = {
+    "score": None,        # API default — Bambu's own relevance ranking
+    "hot": "hotScore",
+    "downloads": "downloadCount",
+    "likes": "likeCount",
+    "new": "newUploads",
+    "boosts": "boosts",
+}
 
 
-def _official_meta(design_id: int | str, timeout: int = 15) -> dict | None:
+def _strip(s) -> str:
+    if not s:
+        return ""
+    s = re.sub(r"<[^>]+>", " ", str(s))
+    return _html.unescape(re.sub(r"\s+", " ", s)).strip()
+
+
+# ---------------------------------------------------------------------------
+# L2/L0 fused layer: official search — discovery AND real data in one call
+# ---------------------------------------------------------------------------
+
+def _official_search(keyword: str, limit: int = 6, order: str = "score", timeout: int = 15) -> dict:
+    """Query Bambu's official search-service. No token, no login.
+
+    Every hit already carries real engagement numbers + cover + tags +
+    staff-pick, ranked by Bambu's own relevance algorithm.
+    Returns a dict: {"total", "hits": [normalized row], "error": str}
+    """
+    params = {"keyword": keyword, "limit": limit, "offset": 0}
+    ob = ORDER_BY.get(order)
+    if ob:
+        params["orderBy"] = ob
+    out = {"total": 0, "hits": [], "error": ""}
+    try:
+        r = requests.get(SEARCH_API, params=params, headers=UA, timeout=timeout)
+        if r.status_code != 200:
+            out["error"] = f"HTTP {r.status_code}"
+            return out
+        d = r.json()
+        if not isinstance(d, dict):
+            out["error"] = "non-dict response"
+            return out
+        out["total"] = d.get("total") or 0
+        for h in d.get("hits") or []:
+            creator = h.get("designCreator") or {}
+            # tags arrive as plain strings from search (unlike design-service's
+            # mixed str/dict arrays — but stay defensive: same upstream family)
+            tags = []
+            for t in h.get("tags") or []:
+                if isinstance(t, dict):
+                    tags.append(t.get("name") or "")
+                elif isinstance(t, str):
+                    tags.append(t)
+            out["hits"].append(
+                {
+                    "url": f"https://makerworld.com/en/models/{h.get('id')}-{h.get('slug') or ''}",
+                    # title = original-language title from official search;
+                    # titleTranslated only fills in when original is empty.
+                    # titleTranslated is a machine translation into English —
+                    # prefer the original (「GAME BOY EDC 磁力推牌」, not
+                    # "GAME BOY EDC Magnetic Pusher").
+                    "title": h.get("title") or h.get("titleTranslated") or "",
+                    "title_translated": h.get("titleTranslated") or "",
+                    "source": "official_search",
+                    "desc": "",
+                    "downloads": h.get("downloadCount"),
+                    "likes": h.get("likeCount"),
+                    "collections": h.get("collectionCount"),
+                    "prints": h.get("printCount"),
+                    "comments": h.get("commentCount"),
+                    "staff_pick": bool(h.get("isStaffPicked")),
+                    "cover": h.get("cover") or "",
+                    "author": creator.get("name") or "",
+                    "author_handle": creator.get("handle") or "",
+                    "tags": [t for t in tags if t][:8],
+                    "license": h.get("license") or "",
+                    "create_time": h.get("createTime") or "",
+                    "official": True,
+                }
+            )
+        if d.get("keywordBlock"):
+            out["error"] = f"keyword blocked: {d.get('blockedMessage') or 'no message'}"
+        if not out["hits"] and not out["error"]:
+            sug = d.get("suggest") or {}
+            opts = sug.get("options") if isinstance(sug, dict) else None
+            if opts:
+                out["error"] = f"no hits; suggestions: {', '.join(map(str, opts[:5]))}"
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# L0 second pass: design-service metadata (summary + translated title)
+# ---------------------------------------------------------------------------
+
+def _official_meta(design_id, timeout: int = 15) -> dict | None:
     """Fetch official public metadata for one design. No token needed.
 
-    Returns dict with title/downloads/likes/cover etc, or None on failure.
-    This is the HIGHEST-priority data source: real counts, official fields.
+    Search hits carry counts/cover/tags already; this adds the summary text
+    (search API returns no description) and zh-translated title.
     """
     try:
         r = requests.get(DESIGN_API.format(design_id=design_id), headers=UA, timeout=timeout)
@@ -61,124 +157,36 @@ def _official_meta(design_id: int | str, timeout: int = 15) -> dict | None:
         d = r.json()
         if not isinstance(d, dict) or "id" not in d:
             return None
-        import html as _html
-
-        def _strip(s):
-            if not s:
-                return ""
-            s = re.sub(r"<[^>]+>", " ", str(s))
-            return _html.unescape(re.sub(r"\s+", " ", s)).strip()
-
         creator = d.get("designCreator") or {}
-        # tags can be a mix of dicts ({name:...}) and plain strings
         tags = []
-        for t in (d.get("tags") or []):
+        for t in d.get("tags") or []:
             if isinstance(t, dict):
                 tags.append(t.get("name") or t.get("nameTranslated") or "")
             elif isinstance(t, str):
                 tags.append(t)
-        cats = []
-        for c in (d.get("categories") or []):
-            if isinstance(c, dict):
-                cats.append(c.get("name") or "")
-            elif isinstance(c, str):
-                cats.append(c)
         return {
             "id": d.get("id"),
             "title": d.get("titleTranslated") or d.get("title") or "",
-            "slug": d.get("slug") or "",
-            "cover": d.get("coverUrl") or "",
             "summary": _strip(d.get("summaryTranslated") or d.get("summary"))[:240],
             "downloads": d.get("downloadCount"),
             "likes": d.get("likeCount"),
             "collections": d.get("collectionCount"),
-            "prints": d.get("printCount"),
-            "comments": d.get("commentCount"),
-            "author": creator.get("name") or creator.get("nickName") or "",
             "staff_pick": bool(d.get("isStaffPicked")),
-            "license": d.get("license") or "",
+            "cover": d.get("coverUrl") or "",
             "tags": [t for t in tags if t][:8],
-            "categories": [c for c in cats if c][:4],
+            "author": creator.get("name") or creator.get("nickName") or "",
+            "license": d.get("license") or "",
         }
     except Exception:
         return None
 
 
-def _ddg_site(query: str, site: str, limit: int, retries: int = 2) -> list:
-    """ddgs site:-restricted search. NOTE: the ddgs package rotates backends
-    (DDG/Brave/...) — the error messages show search.brave.com requests, so
-    rate-limit behavior is "strictest backend wins", not duckduckgo.com's."""
-    if not DDGS_AVAILABLE:
-        raise RuntimeError("ddgs not installed: pip install ddgs")
-    q = f"site:{site} {query}"
-    results = []
-    for attempt in range(retries):
-        try:
-            raw = DDGS().text(q, max_results=limit * 3, timeout=12)
-            for r in raw:
-                # strip ?from=search / #anchor noise before storing
-                url = (r.get("href") or "").split("?")[0].split("#")[0]
-                title = r.get("title") or ""
-                body = r.get("body") or ""
-                if site not in url:
-                    continue
-                # Keep only real model pages; drop collections/users/search pages.
-                # Any language prefix is fine on both sites — variants merge by
-                # design_id later (a /zh/-only regex would silently drop
-                # makerworld.com.cn/en/... pages DDG happens to index).
-                if site.endswith(".cn"):
-                    ok = re.search(r"makerworld\.com\.cn/(?:[a-z-]+/)?models/\d+", url)
-                else:
-                    ok = re.search(r"makerworld\.com/(?:[a-z-]+/)?models/\d+", url)
-                if not ok or "/search" in url:
-                    continue
-                results.append(
-                    {"url": url, "title": title, "source": site, "desc": body.strip()[:220]}
-                )
-                if len(results) >= limit:
-                    break
-            break
-        except Exception:
-            time.sleep(1.0)
-    return results[:limit]
+# ---------------------------------------------------------------------------
+# Complement layer: Printables public GraphQL API (kept from v2 — official
+# search covers MakerWorld only; Printables stays a cross-site complement)
+# ---------------------------------------------------------------------------
 
-
-def _ddg_plain(query: str, limit: int, retries: int = 2) -> list:
-    """Open-web ddgs search (no site: filter), keep only MakerWorld/Printables
-    model pages. Rescue layer for cold-start queries site:-search misses."""
-    if not DDGS_AVAILABLE:
-        raise RuntimeError("ddgs not installed: pip install ddgs")
-    results = []
-    for attempt in range(retries):
-        try:
-            raw = DDGS().text(query, max_results=limit * 5, timeout=12)
-            for r in raw:
-                url = (r.get("href") or "").split("?")[0].split("#")[0]
-                site = None
-                if MW_URL_RE.search(url) and "/search" not in url:
-                    site = "makerworld.com.cn" if ".cn" in url else "makerworld.com"
-                elif PRINTABLES_URL_RE.search(url):
-                    site = "printables.com"
-                if not site:
-                    continue
-                results.append(
-                    {
-                        "url": url,
-                        "title": r.get("title") or "",
-                        "source": site,
-                        "desc": (r.get("body") or "").strip()[:220],
-                    }
-                )
-                if len(results) >= limit:
-                    break
-            break
-        except Exception:
-            time.sleep(1.0)
-    return results[:limit]
-
-
-def _printables_api(query: str, limit: int) -> list:
-    """Printables public GraphQL API — best field coverage in the chain."""
+def _printables_api_impl(query: str, limit: int) -> list:
     endpoint = "https://api.printables.com/graphql/"
     payload = {
         "query": """
@@ -202,11 +210,10 @@ def _printables_api(query: str, limit: int) -> list:
         "variables": {"first": limit, "name": query, "sort": "POPULARITY_ALL_TIME"},
     }
     try:
-        r = requests.post(endpoint, json=payload, headers=UA, timeout=20)
+        r = requests.post(endpoint, json=payload, headers=UA, timeout=8)
         if r.status_code != 200:
             return []
-        data = r.json()
-        edges = data.get("data", {}).get("print", {}).get("edges", [])
+        edges = r.json().get("data", {}).get("print", {}).get("edges", [])
         out = []
         for e in edges:
             n = e.get("node", {})
@@ -219,6 +226,7 @@ def _printables_api(query: str, limit: int) -> list:
                     "url": f"https://www.printables.com/model/{n.get('id')}/{n.get('slug') or ''}",
                     "title": n.get("name") or "",
                     "source": "printables.com",
+                    "desc": "",
                     "downloads": n.get("downloadsCountAllTime"),
                     "likes": n.get("likesCountAllTime"),
                     "image": img,
@@ -229,279 +237,164 @@ def _printables_api(query: str, limit: int) -> list:
         return []
 
 
+# ---------------------------------------------------------------------------
+# --meta mode: metadata for one known model URL (kept from v2, now goes
+# straight to the official design-service endpoint instead of og: scraping)
+# ---------------------------------------------------------------------------
+
 def _meta_single(url: str) -> dict:
-    """Try to fetch og: metadata from a single model page. 403 → return gracefully."""
-    out = {"url": url, "og_title": None, "og_image": None, "og_description": None, "fetched": False}
-    try:
-        r = requests.get(url, headers=UA, timeout=15)
-        if r.status_code != 200:
-            out["http_status"] = r.status_code
-            return out
-        t = r.text
-        for key in ("og:title", "og:image", "og:description"):
-            m = re.search(r'<meta[^>]*property="{}"[^>]*content="([^"]+)"'.format(key), t)
-            if m:
-                out[key.replace(":", "_")] = m.group(1)[:300]
+    out = {"url": url, "fetched": False}
+    m = re.search(r"makerworld\.com(?:\.cn)?/(?:[a-z-]+/)?models/(\d+)", url)
+    if not m:
+        out["error"] = "not a makerworld model URL"
+        return out
+    domain = urlparse(url).netloc
+    if domain.endswith(".cn"):
+        out["error"] = (
+            "makerworld.com.cn uses a separate ID space — IDs do not match the "
+            "design-service API (verified 2026-09-04); use the makerworld.com mirror"
+        )
+        return out
+    meta = _official_meta(m.group(1), timeout=15)
+    if meta:
+        out.update(meta)
         out["fetched"] = True
-    except Exception as e:
-        out["error"] = str(e)[:100]
+    else:
+        out["error"] = "design-service API returned no data"
     return out
 
 
-def _clean_desc(desc: str, source: str) -> str:
-    """Strip page-chrome noise from DDG body snippets (nav links, author rows, boilerplate)."""
-    t = desc
-    t = re.sub(r"Download this free 3D print file designed by [\w\-\.]+\.?", "", t)
-    t = re.sub(r"MakerWorld is the leading[^.]*\.", "", t)
-    # nav junk common on makerworld pages
-    t = re.sub(r"(关注|已发布|相关模型|收藏夹|下载模型|更多模型|返回|举报)", " ", t)
-    t = re.sub(r"by user_[\w]+", " ", t)
-    t = re.sub(r"[A-Za-z0-9_-]+\.?\s*\d*\.?\s*[\d.]+\s*[kKmM]?\s*$", " ", t)  # trailing counts
-    t = re.sub(r"\s{2,}", " ", t).strip(" .、,")
-    return t[:200]
-
+# ---------------------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------------------
 
 def _quality_signal(r: dict) -> tuple:
-    """Heuristic quality signals extractable without hitting the site.
+    """Heuristic quality signals for rows without official counts (Printables).
 
-    DDG gives us no download/like counts (CF blocks direct pages), but titles and
-    descs leak real signals. Returns (score, signals:list) — higher is better.
+    Official-search rows already rank by Bambu's own algorithm; these signals
+    only fill gaps and act as a minor tie-breaker (5x weight).
     """
     title = (r.get("title") or "").lower()
     desc = (r.get("desc") or "").lower()
     text = title + " " + desc
     score = 0
     signals = []
-
-    # 1. Author credit in title ("by Xxx") — popular models usually carry it in DDG index
-    #    user_<digits> throwaway accounts don't count.
-    m = re.search(r"\bby\s+([a-z0-9_\-.]{2,20})$", title)
-    if m and not re.match(r"^user_\d+$", m.group(1)):
-        score += 2
-        signals.append("具名作者")
-
-    # 2. Popularity counts leaked into desc ("4.5k", "1.2 M downloads" style)
-    m = re.findall(r"(\d+(?:\.\d+)?)\s*k\b", text)
-    if m:
-        top_k = max(float(x) for x in m)
-        score += 1 + min(int(top_k), 5)  # 4.5k ≈ +5, 0.5k ≈ +1
-        signals.append(f"热度{top_k}k级")
-    big = re.search(r"(\d{3,})\s*(?:downloads?|下载)", text)
-    if big:
-        score += 2
-        signals.append("高下载量")
-
-    # 3. Print-practical keywords in desc — signals a maintained, usable model
     for kw, w in [("no support", 2), ("无支撑", 2), ("ams", 1), ("multicolor", 1),
                   ("多色", 1), ("parametric", 2), ("参数化", 2), ("customizer", 2),
                   ("test print", 2), ("实测", 2), ("已优化", 2), ("optimized", 2)]:
         if kw in text:
             score += w
             signals.append(kw)
-
-    # 4. Language match bonus is NOT scored here (agent decides per user language)
     return score, signals
 
 
-def _dedup(results: list) -> list:
-    seen = set()
-    out = []
-    for r in results:
-        p = urlparse(r["url"])
-        key = (p.netloc, re.sub(r"[?#].*$", "", p.path))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(r)
-    return out
+def _rank_key(r: dict) -> int:
+    # official counts first; fall back to top-level counts (Printables rows)
+    dl = r["downloads"] if isinstance(r.get("downloads"), int) else 0
+    lk = r["likes"] if isinstance(r.get("likes"), int) else 0
+    cl = r["collections"] if isinstance(r.get("collections"), int) else 0
+    sp = 30 if r.get("staff_pick") else 0
+    return sp + dl + 3 * lk + 2 * cl + 5 * r.get("score", 0)
 
 
-def _clean_title(title: str, source: str) -> str:
-    """Strip 'MakerWorld: ...' / ' - Printables' tails that DDG keeps in titles."""
-    t = title
-    # Loop: DDG titles can carry multiple tails ("X - 免费 3D 打印模型 - MakerWorld")
-    for _ in range(3):
-        t2 = t
-        t2 = re.sub(r"\s*-\s*免费 3D 打印模型\s*$", "", t2)
-        t2 = re.sub(r"\s*-\s*免費 3D 列印模型\s*$", "", t2)
-        t2 = re.sub(r"\s*-\s*Free 3D Print Model\s*$", "", t2)
-        t2 = re.sub(r"\s*-\s*MakerWorld[：:]?\s*.*$", "", t2)
-        t2 = re.sub(r"\s*-\s*Printables\.com\s*.*$", "", t2)
-        t2 = re.sub(r"\s*来自\s+[\w\.\-]+\s*MakerWorld[：:]?\s*.*$", "", t2)
-        t2 = re.sub(r"\s+MakerWorld[：:]\s*.*$", "", t2)
-        if t2 == t:
-            break
-        t = t2
-    t = t.strip()
-    return t if len(t) >= 3 else title.strip()
+# ---------------------------------------------------------------------------
+# Main search flow
+# ---------------------------------------------------------------------------
 
+def search(query: str, source: str = "auto", limit: int = 6, order: str = "score") -> dict:
+    import threading
 
-def search(query: str, source: str = "auto", limit: int = 6) -> dict:
     layers_used = []
-    all_results = []
+    results = []
 
-    def run_layer(name, fn, seconds=25):
-        """Run one retrieval layer in a thread; results land in all_results/layers_used."""
+    # Layer 1: official search-service (MakerWorld)
+    if source in ("auto", "cn", "intl"):
+        t0 = time.time()
+        got = _official_search(query, limit=limit * 2, order=order)
+        layers_used.append(
+            {
+                "layer": "official_search",
+                "results": len(got["hits"]),
+                "total_matches": got["total"],
+                "elapsed_s": round(time.time() - t0, 2),
+                "error": got["error"],
+            }
+        )
+        results.extend(got["hits"])
+
+    # Layer 2: Printables complement (cross-site only in auto mode)
+    if source == "auto" and _printables_api_impl:
         got = []
         err = ""
         try:
-            got = run_with_timeout(fn, seconds)
+            got = _printables_api_impl(query, limit)
         except Exception as e:
             err = f"{type(e).__name__}: {str(e)[:70]}"
-            print(f"[_run_layer] {name} failed/timeout: {err}", file=sys.stderr)
-        layers_used.append({"layer": name, "results": len(got), "error": err})
-        all_results.extend(got)
+        layers_used.append({"layer": "printables_api", "results": len(got), "error": err})
+        results.extend(got)
+    elif source == "printables":
+        got = _printables_api_impl(query, limit)
+        layers_used.append({"layer": "printables_api", "results": len(got), "error": ""})
+        results.extend(got)
 
-    import threading
-
-    def run_with_timeout(fn, seconds):
-        """Run fn with a hard time budget, surfacing inner exceptions (a raise
-        inside the thread previously died silently → invisible empty layer)."""
-        box = {}
-
-        def _target():
-            try:
-                box["ok"] = fn()
-            except Exception as e:
-                box["err"] = f"{type(e).__name__}: {str(e)[:70]}"
-
-        t = threading.Thread(target=_target, daemon=True)
-        t.start()
-        t.join(seconds)
-        if "err" in box:
-            raise RuntimeError(box["err"])
-        if t.is_alive():
-            raise TimeoutError(f"layer exceeded {seconds}s")
-        return box.get("ok", [])
-
-    jobs = []
-    if source in ("auto", "cn"):
-        jobs.append(("makerworld.com.cn", lambda: _ddg_site(query, SITE_CN, limit)))
-    if source in ("auto", "intl"):
-        jobs.append(("makerworld.com", lambda: _ddg_site(query, SITE_INTL, limit)))
-    if source in ("auto", "printables"):
-        jobs.append(("printables_api", lambda: _printables_api(query, limit)))
-    if source == "plain":
-        jobs.append(("ddg_plain", lambda: _ddg_plain(query, limit)))
-
-    threads = [threading.Thread(target=run_layer, args=(n, f), daemon=True) for n, f in jobs]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
-
-    results = _dedup(all_results)
-    # Merge same-design language variants (en/ru/zh paths) by design_id
-    by_id = {}
-    merged = []
-    for r in results:
-        m = re.search(r"makerworld\.com(?:\.cn)?/(?:[a-z-]+/)?models/(\d+)", r["url"])
-        if m and "makerworld" in r.get("source", ""):
-            did = m.group(1)
-            if did in by_id:
-                # prefer zh/cn variant as canonical, keep other as alt URL
-                if ".cn" in r["url"] and ".cn" not in by_id[did]["url"]:
-                    r2 = by_id[did]
-                    r["alt_urls"] = [r2["url"]] + r2.get("alt_urls", [])
-                    by_id[did] = r
-                    idx = merged.index(r2)
-                    merged[idx] = r
-                else:
-                    r2 = by_id[did]
-                    r2.setdefault("alt_urls", []).append(r["url"])
-                continue
-            by_id[did] = r
-        merged.append(r)
-    results = merged
-
-    for r in results:
-        r["title"] = _clean_title(r["title"], r["source"])
-        if r.get("desc"):
-            r["desc"] = _clean_desc(r["desc"], r["source"])
-
-    # === L0 official enrichment: for every MakerWorld result, hit the official
-    # design-service API (no token needed) to get REAL download/like/collect
-    # counts + cover image + tags. DDG only discovered the URL; official data
-    # enriches and re-ranks it. ===
-    official_ok = 0
-    mw_results = [r for r in results if "makerworld.com" in r.get("source", "")]
-    ids = []
-    for r in mw_results:
+    # Second pass: fill summary + translated title via design-service (staggered,
+    # single global 12s budget — light-touch, ≤ limit calls, not batch scraping)
+    mw_rows = [r for r in results if r.get("official")]
+    def _fill_summary(r, delay):
+        time.sleep(delay)
         m = re.search(r"models/(\d+)", r["url"])
-        if m:
-            ids.append((r, m.group(1)))
-
-    def _enrich(r, did):
-        meta = _official_meta(did)
+        if not m:
+            return
+        meta = _official_meta(m.group(1))
         if meta:
-            r["official"] = meta
-            # Title from official API is cleaner than DDG's
-            if meta.get("title"):
-                r["title"] = meta["title"]
+            # NOTE: only fill the summary here. Do NOT override r["title"] —
+            # design-service titleTranslated machine-translates Chinese models
+            # into English, destroying the original title the user searched for
+            # (bitten 2026-09-05: 「GAME BOY EDC 磁力推牌」→ "GAME BOY EDC Magnetic Pusher").
             if meta.get("summary"):
                 r["desc"] = meta["summary"]
 
-    import threading as _t
+    ths = []
+    for i, r in enumerate(mw_rows[:limit]):
+        ths.append(threading.Thread(target=_fill_summary, args=(r, 0.08 * i), daemon=True))
+    for t in ths:
+        t.start()
+    deadline = time.time() + 12
+    for t in ths:
+        t.join(timeout=max(0.0, deadline - time.time()))
 
-    def _enrich_staggered(r, did, delay):
-        time.sleep(delay)
-        _enrich(r, did)
-
-    en_threads = []
-    for i, (r, did) in enumerate(ids):
-        # 80ms stagger: 20 simultaneous hits on the design-service API could
-        # look like a burst; spreading starts over ~1.5s keeps us polite.
-        en_threads.append(_t.Thread(target=_enrich_staggered, args=(r, did, 0.08 * i), daemon=True))
-    for th in en_threads:
-        th.start()
-    # single global budget: sequential th.join(timeout=12) would stack to 12s*N
-    # worst-case with slow threads; joining against one deadline caps enrichment
-    # at ~15s total regardless of candidate count.
-    deadline = time.time() + 15
-    for th in en_threads:
-        th.join(timeout=max(0.0, deadline - time.time()))
-    official_ok = sum(1 for r in results if r.get("official"))
-
-    # === Ranking: real official counts dominate; heuristic signals only fill gaps ===
-    # Heuristic quality signals (author credit, popularity leak in desc, print-practical
-    # keywords) apply to ALL results — for officially-enriched ones they're a minor tie
-    # breaker (5x), for un-enriched ones (API failed / Printables cold rows) they're
-    # the only ranking signal. Computed here because score/signals were previously
-    # never populated (dead code — found in 2026-09-02 audit).
+    # Heuristic signals + final rank
     for r in results:
         r["score"], r["signals"] = _quality_signal(r)
-
-    def _rank_key(r):
-        off = r.get("official") or {}
-        # official API first; fall back to top-level counts (Printables rows carry
-        # downloads/likes at top level — _rank_key previously missed them entirely)
-        dl = off.get("downloads") if isinstance(off.get("downloads"), int) else (r.get("downloads") or 0)
-        lk = off.get("likes") if isinstance(off.get("likes"), int) else (r.get("likes") or 0)
-        cl = off.get("collections") if isinstance(off.get("collections"), int) else (r.get("collections") or 0)
-        sp = 30 if off.get("staff_pick") else 0
-        # popularity = downloads + 3*likes + 2*collections + staff-pick boost
-        return sp + dl + 3 * lk + 2 * cl + 5 * r.get("score", 0)
-
-    for r in results:
         r["final_score"] = _rank_key(r)
-    results.sort(key=lambda r: -r["final_score"])
+
+    # Official-search rows keep API relevance order (Bambu's algorithm > our
+    # popularity formula); they're placed above complement rows. Complement rows
+    # (Printables) sort by final_score among themselves.
+    official_rows = [r for r in results if r.get("official")]
+    complement_rows = [r for r in results if not r.get("official")]
+    complement_rows.sort(key=lambda r: -r["final_score"])
+    results = official_rows + complement_rows
 
     return {
         "query": query,
         "mode": source,
+        "order": order,
         "total": len(results),
-        "official_enriched": official_ok,
+        "official_search_hits": len(official_rows),
         "layers": layers_used,
-        "results": results,
+        "results": results[: max(limit * 3, len(results))],
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("query", nargs="*", help="search keywords (L1 output)")
-    ap.add_argument("--source", default="auto", choices=["auto", "cn", "intl", "printables", "plain"])
+    ap.add_argument("--source", default="auto", choices=["auto", "cn", "intl", "printables"])
     ap.add_argument("--limit", type=int, default=6)
-    ap.add_argument("--meta", help="fetch og metadata for a single model URL")
+    ap.add_argument("--order", default="score", choices=list(ORDER_BY.keys()),
+                    help="score=relevance (default) | hot | downloads | likes | new | boosts")
+    ap.add_argument("--meta", help="fetch official metadata for a single model URL")
     args = ap.parse_args()
 
     if args.meta:
@@ -512,7 +405,7 @@ def main():
     if not q:
         print(json.dumps({"error": "empty query"}, ensure_ascii=False))
         return
-    out = search(q, args.source, args.limit)
+    out = search(q, args.source, args.limit, args.order)
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
