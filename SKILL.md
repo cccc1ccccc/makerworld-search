@@ -1,7 +1,7 @@
 ---
 name: makerworld-search
 description: "Natural-language semantic search for 3D printable models via Bambu's official search-service API (no token). Activate when user wants to find/discover 3D models, e.g. 'find me a pegboard cable holder', '找一个手机支架', '找模型'. Pipeline: L1 intent→keyword rewrite (bilingual) → L2 official search API (real relevance ranking + real counts in every hit) → L2b design-service summary fill → L3 result cards with intent gatekeeping."
-version: "0.5.0"
+version: "0.5.1"
 license: MIT
 keywords:
   - 3d model search
@@ -50,8 +50,8 @@ keywords:
    ▼
 [L3 结果卡片]（agent 自己做，不调脚本）
    - 官方相关性排序为候选池，按意图挑 top 3-5
-   - 输出卡片：标题（原语言） / 真实下载·赞·藏数 / 封面 / 链接 / 匹配理由
-   - 附加：问用户"看中哪个？我可以直接下载→改尺寸→上色"
+   - **默认输出 = HTML 图墙**（见下方 L3 章节），文字卡片仅 fallback
+   - 附加：问用户"看中哪个？直接报编号，我可以下载→改尺寸→上色"
 ```
 
 ## Quick Reference
@@ -97,13 +97,25 @@ keywords:
 - **.cn 站独立 ID 空间的坑仍在**：`--meta` 对 makerworld.com.cn URL 会直接报错提示（design-service API 只认国际站 ID）。搜索结果 URL 统一生成 makerworld.com 域名，天然避开此坑
 - **Printables 层（auto 模式）墙内不可达**：8s 超时快速失败，不影响主流程。境外网络可达时作为跨站补充
 
-## L3 卡片格式（输出给用户前先过一遍）
+## L3 结果卡片：默认 HTML 图墙（2026-09-05 用户定版）
+
+**图片是搜索结果的灵魂，纯文字卡片是失败的展示。** 默认输出 HTML 图墙（封面大图 +
+数据 + 链接的卡片墙），用 Edge headless 截图发图（用户在飞书里直接看图选型，
+不再对着 URL 脑补模型长相）。实测踩坑：多模型纯文字罗列时用户明确反馈
+「分不出来哪个图片对应哪个模型」——每张卡必须图模同卡，编号对应。
+
+HTML 图墙规范（实测可行配方）：
+- 每卡：封面图（本地下载勿热链）+ 标题 + 下载/赞数 + 一句话匹配理由 + 链接
+- 卡片按类型分组（如「专用款/通用款」），标题行加序号（①②③…）与图一一对应
+- 危险信号黄牌标注（如孔距不兼容：`⚠ 非 SKÅDIS 标准孔距，别买错`）
+- 暗色主题 + 卡片圆角；截图路径规范见 creative-diagrams 流程
+- 交付顺序：先发截图（图墙），文字里只报文件路径与选型指引，别重复罗列模型
 
 ```
 🔍 为你找到 N 个模型（官方搜索，按相关性排序）：
 
 1. **GAME BOY EDC 磁力推牌** ｜ MakerWorld
-   📥 3199 下载 · 👍 3062 赞 · 封面: [URL]
+   📥 3199 下载 · 👍 3062 赞
    简介：磁力推牌，GAME BOY 造型……
    链接：https://makerworld.com/en/models/732713
    匹配：正是你要的"推牌"，tags: EDC/推牌/磁力
@@ -111,7 +123,9 @@ keywords:
 2. ...
 ```
 
-- 每条必含：标题（**原语言**）、链接、真实数据（downloads/likes/collections/staff_pick/prints）、desc 一句话、一句话匹配理由
+↑ 文字卡片只在纯文本环境（无渲染/截图能力）作 fallback；默认交付走 HTML 图墙。
+
+- 封面图必须本地下载后嵌入 HTML（webp→jpg，勿热链勿占 CDN），飞书才能内联预览
 - **字段都在顶层**（v3 简化）：`r["downloads"]` / `r["likes"]` / `r["collections"]` / `r["staff_pick"]` / `r["cover"]` / `r["tags"]` / `r["desc"]` / `r["title_translated"]`。无 official 嵌套对象
 - **数字显示用 `isinstance(n, int)` 判断**，0 下载是真实信号（冷启动模型），不要显示成 '?'
 - **staff_pick 是金信号**：`r["staff_pick"]=true` 优先推荐（官方人工精选背书）
