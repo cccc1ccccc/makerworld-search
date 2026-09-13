@@ -43,8 +43,6 @@ UA = {
 # Doridian/OpenBambuAPI cloud-http.md (Search Service table).
 SEARCH_API = "https://api.bambulab.com/v1/search-service/select/design2"
 DESIGN_API = "https://api.bambulab.com/v1/design-service/design/{design_id}"
-PRINTABLES_URL_RE = re.compile(r"printables\.com/model/(\d+)")
-MW_URL_RE = re.compile(r"makerworld\.com(?:\.cn)?/(?:[a-z-]+/)?models/(\d+)-?([^/?#]*)")
 
 # orderBy values verified live (2026-09-05): score (default relevance),
 # hotScore, downloadCount, likeCount, newUploads, boosts.
@@ -167,6 +165,13 @@ def _official_meta(design_id, timeout: int = 15) -> dict | None:
         return {
             "id": d.get("id"),
             "title": d.get("titleTranslated") or d.get("title") or "",
+            # summaryTranslated is a machine translation (zh for EN models).
+            # Unlike the title case (where the original is kept and
+            # titleTranslated only FALLS BACK), summaries deliberately prefer
+            # the translated field: the primary audience reads zh and a rough
+            # zh summary beats an EN one for gatekeeping. Keep this asymmetry
+            # in mind if the audience changes — title policy must NOT follow
+            # this (original titles are user-facing identity).
             "summary": _strip(d.get("summaryTranslated") or d.get("summary"))[:240],
             "downloads": d.get("downloadCount"),
             "likes": d.get("likeCount"),
@@ -307,10 +312,39 @@ def search(query: str, source: str = "auto", limit: int = 6, order: str = "score
     layers_used = []
     results = []
 
-    # Layer 1: official search-service (MakerWorld)
+    # In auto mode the official search and the Printables complement run in
+    # PARALLEL: the Printables layer is often unreachable behind the GFW and
+    # burns its full 8s timeout — running it serially turned every auto query
+    # into official_time + 8s (bitten 2026-09-13). Parallel keeps the
+    # end-to-end latency at max(layers), not sum(layers).
+    t0 = time.time()
+    official_res = {}
+    printables_res = {}
+    official_total = 0
+
+    def _run_official():
+        official_res["got"] = _official_search(query, limit=limit * 2, order=order)
+
+    def _run_printables():
+        try:
+            printables_res["got"] = _printables_api_impl(query, limit)
+        except Exception as e:
+            printables_res["got"] = []
+            printables_res["err"] = f"{type(e).__name__}: {str(e)[:70]}"
+
     if source in ("auto", "cn", "intl"):
-        t0 = time.time()
-        got = _official_search(query, limit=limit * 2, order=order)
+        th_off = threading.Thread(target=_run_official, daemon=True)
+        th_off.start()
+    if source == "auto":
+        th_pr = threading.Thread(target=_run_printables, daemon=True)
+        th_pr.start()
+    elif source == "printables":
+        _run_printables()
+
+    if source in ("auto", "cn", "intl"):
+        th_off.join()
+        got = official_res.get("got", {"total": 0, "hits": [], "error": "thread lost"})
+        official_total = got["total"]
         layers_used.append(
             {
                 "layer": "official_search",
@@ -322,19 +356,16 @@ def search(query: str, source: str = "auto", limit: int = 6, order: str = "score
         )
         results.extend(got["hits"])
 
-    # Layer 2: Printables complement (cross-site only in auto mode)
-    if source == "auto" and _printables_api_impl:
-        got = []
-        err = ""
-        try:
-            got = _printables_api_impl(query, limit)
-        except Exception as e:
-            err = f"{type(e).__name__}: {str(e)[:70]}"
-        layers_used.append({"layer": "printables_api", "results": len(got), "error": err})
+    if source == "auto":
+        th_pr.join()
+        got = printables_res.get("got", [])
+        layers_used.append({"layer": "printables_api", "results": len(got),
+                            "error": printables_res.get("err", "")})
         results.extend(got)
     elif source == "printables":
-        got = _printables_api_impl(query, limit)
-        layers_used.append({"layer": "printables_api", "results": len(got), "error": ""})
+        got = printables_res.get("got", [])
+        layers_used.append({"layer": "printables_api", "results": len(got),
+                            "error": printables_res.get("err", "")})
         results.extend(got)
 
     # Second pass: fill summary + translated title via design-service (staggered,
@@ -380,10 +411,11 @@ def search(query: str, source: str = "auto", limit: int = 6, order: str = "score
         "query": query,
         "mode": source,
         "order": order,
-        "total": len(results),
+        "total": len(results),  # rows returned to the agent (official + complement)
+        "matched_total": official_total,  # official relevance engine's match count
         "official_search_hits": len(official_rows),
         "layers": layers_used,
-        "results": results[: max(limit * 3, len(results))],
+        "results": results[: limit * 3],
     }
 
 

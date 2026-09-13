@@ -50,7 +50,7 @@ The agent side of the protocol (L1 rewrite rules, L3 gatekeeping checklist, card
 
 - Both endpoints (`search-service` search, `design-service` metadata) are **undocumented but public** (plain GET, no auth) — the same `v1/*-service` microservice family. Reverse-engineering pattern first published by the **[Bambuddy](https://github.com/maziggy/bambuddy) wiki** (upstream credit: Pr0zak / YASTL#51); the Search Service endpoint table is cross-referenced in **[Doridian/OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)** `cloud-http.md`.
 - Usage posture: one search call per keyword group + ≤ limit metadata calls per query. No batch scraping, no auth bypass, no file downloads.
-- The optional Printables complement layer uses Printables' public GraphQL API; on CN networks it is often unreachable (GFW) and fails fast (~8s) without affecting the main flow.
+- The optional Printables complement layer uses Printables' public GraphQL API and runs **in parallel** with the official search (since v0.6.0); on CN networks it is often unreachable (GFW) and fails fast (~8s) without delaying the main flow.
 - MakerWorld model downloads require login by design — this skill gives you the link; you click it.
 - Community context: users have long requested an official MakerWorld API ([forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)); no documented API is planned. This skill wraps the *production* endpoints the official apps use — a community bridge until Bambu documents them.
 
@@ -119,7 +119,7 @@ python3 scripts/search_mw.py --meta "https://makerworld.com/en/models/717070-pho
 
 - 两个端点（search-service 搜索、design-service 元数据）均为**未文档化的公开接口**（纯 GET，无鉴权）——同一 `v1/*-service` 微服务族。逆向模式首发表于 **[Bambuddy](https://github.com/maziggy/bambuddy) wiki**（上游：Pr0zak / YASTL#51）；Search Service 端点表交叉引用自 **[Doridian/OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)** 的 `cloud-http.md`。
 - 使用姿态：每关键词组一次搜索 + 每查询 ≤ limit 次元数据调用。不批量抓取、不绕验证、不代下载文件。
-- 可选的 Printables 补充层用其公开 GraphQL API；国内网络常不可达（墙），8s 快速失败不影响主流程。
+- 可选的 Printables 补充层用其公开 GraphQL API，且与官方搜索**并行**执行（v0.6.0 起）；国内网络常不可达（墙），8s 快速失败不拖慢主流程。
 - MakerWorld 模型下载按官方设计需登录——skill 给你链接，你自己点。
 - 社区背景：用户长期呼吁官方出 MakerWorld API（[forum #205669](https://forum.bambulab.com/t/makerworld-api/205669)）；官方无文档化计划。本 skill 封装的是官方 App 正在使用的*生产端点*——在拓竹文档化之前，这是社区桥接方案。
 

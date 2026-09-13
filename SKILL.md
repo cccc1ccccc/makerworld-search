@@ -1,7 +1,7 @@
 ---
 name: makerworld-search
-description: "Natural-language semantic search for 3D printable models via Bambu's official search-service API (no token). Activate when user wants to find/discover 3D models, e.g. 'find me a pegboard cable holder', '找一个手机支架', '找模型'. Pipeline: L1 intent→keyword rewrite (bilingual) → L2 official search API (real relevance ranking + real counts in every hit) → L2b design-service summary fill → L3 result cards with intent gatekeeping."
-version: "0.5.1"
+description: "Natural-language search for 3D printable models via Bambu's official search-service API (no token, no login). Activate when user wants to find/discover 3D models: 'find me a pegboard cable holder', '找一个手机支架', '找模型', '搜一个冰箱贴', model discovery/shortlisting on MakerWorld or Printables. The agent rewrites intent into bilingual keywords, queries the official API, and gatekeeps results against the user's intent."
+version: "0.6.0"
 license: MIT
 keywords:
   - 3d model search
@@ -95,21 +95,24 @@ keywords:
 - **搜索 hit 不含 summary/desc**：desc 由 L2b design-service 补全（top-N 限量调用，非批量抓取）
 - **`--source intl/cn` 现在只影响是否加 Printables 补充层**：官方搜索 API 不分站（.com 国际站 ID 空间），cn/intl/international 结果一致
 - **.cn 站独立 ID 空间的坑仍在**：`--meta` 对 makerworld.com.cn URL 会直接报错提示（design-service API 只认国际站 ID）。搜索结果 URL 统一生成 makerworld.com 域名，天然避开此坑
-- **Printables 层（auto 模式）墙内不可达**：8s 超时快速失败，不影响主流程。境外网络可达时作为跨站补充
+- **Printables 层（auto 模式）墙内不可达**：与官方搜索**并行**发出（v0.6.0 起——旧版串行执行时，墙内每次 auto 查询都要白等 8s 超时），8s 超时快速失败，不拖慢主流程。境外网络可达时作为跨站补充
 
-## L3 结果卡片：默认 HTML 图墙（2026-09-05 用户定版）
+## L3 结果卡片
 
-**图片是搜索结果的灵魂，纯文字卡片是失败的展示。** 默认输出 HTML 图墙（封面大图 +
-数据 + 链接的卡片墙），用 Edge headless 截图发图（用户在飞书里直接看图选型，
-不再对着 URL 脑补模型长相）。实测踩坑：多模型纯文字罗列时用户明确反馈
-「分不出来哪个图片对应哪个模型」——每张卡必须图模同卡，编号对应。
+**图片是搜索结果的灵魂，纯文字卡片是失败的展示。** 实测踩坑：多模型纯文字罗列时
+用户明确反馈「分不出来哪个图片对应哪个模型」——每张卡必须图模同卡，编号对应。
 
-HTML 图墙规范（实测可行配方）：
-- 每卡：封面图（本地下载勿热链）+ 标题 + 下载/赞数 + 一句话匹配理由 + 链接
-- 卡片按类型分组（如「专用款/通用款」），标题行加序号（①②③…）与图一一对应
-- 危险信号黄牌标注（如孔距不兼容：`⚠ 非 SKÅDIS 标准孔距，别买错`）
-- 暗色主题 + 卡片圆角；截图路径规范见 creative-diagrams 流程
-- 交付顺序：先发截图（图墙），文字里只报文件路径与选型指引，别重复罗列模型
+按交付环境选择输出形态：
+
+- **支持 HTML/截图的环境**：默认输出 HTML 图墙（封面大图 + 数据 + 链接的卡片墙），
+  用无头浏览器截图发图，用户直接看图选型。图墙规范（实测可行配方）：
+  - 每卡：封面图（本地下载勿热链）+ 标题 + 下载/赞数 + 一句话匹配理由 + 链接
+  - 卡片按类型分组（如「专用款/通用款」），标题行加序号（①②③…）与图一一对应
+  - 危险信号黄牌标注（如孔距不兼容：`⚠ 非 SKÅDIS 标准孔距，别买错`）
+  - 暗色主题 + 卡片圆角
+  - 交付顺序：先发截图（图墙），文字里只报文件路径与选型指引，别重复罗列模型
+- **纯文本环境**：文字卡片 fallback（下方格式），每卡仍要引用封面图 URL 让
+  用户可点开看图
 
 ```
 🔍 为你找到 N 个模型（官方搜索，按相关性排序）：
@@ -123,21 +126,23 @@ HTML 图墙规范（实测可行配方）：
 2. ...
 ```
 
-↑ 文字卡片只在纯文本环境（无渲染/截图能力）作 fallback；默认交付走 HTML 图墙。
+↑ 文字卡片格式（纯文本环境 fallback；HTML 图墙的每卡内容与此一致）。
 
-- 封面图必须本地下载后嵌入 HTML（webp→jpg，勿热链勿占 CDN），飞书才能内联预览
+- 封面图必须本地下载后嵌入 HTML（webp→jpg，勿热链勿占 CDN），聊天客户端才能内联预览
 - **字段都在顶层**（v3 简化）：`r["downloads"]` / `r["likes"]` / `r["collections"]` / `r["staff_pick"]` / `r["cover"]` / `r["tags"]` / `r["desc"]` / `r["title_translated"]`。无 official 嵌套对象
+- 顶层 `matched_total` = 官方相关性引擎的总匹配数（区别于 `total` = 返回给 agent 的行数）
 - **数字显示用 `isinstance(n, int)` 判断**，0 下载是真实信号（冷启动模型），不要显示成 '?'
 - **staff_pick 是金信号**：`r["staff_pick"]=true` 优先推荐（官方人工精选背书）
 - **排序规则**：脚本默认返回官方相关性顺序（score）。agent 可选 `--order downloads` 拿纯热度序。最终输出前逐条判断「标题/简介/tags 与意图的相符度」，不符的剔除或排末位
-- 结果 <2 个时：换同义词重查（`holder↔clip↔organizer`）；仍无 → 建议走生成兜底（generate.py）
+- 结果 <2 个时：换同义词重查（`holder↔clip↔organizer`）；仍无 → 征询用户走生成兜底（Tripo/Meshy 类服务）
 - 匹配理由必须基于标题/desc/官方 tags 推断，不许编造
 
 ## 与其他 Skill 的接口
 
-- 找到模型 → 用户要改尺寸/开孔 → 转交 **bambu-studio-ai**（analyze+parametric 管线）
-- 找不到 → 征询用户走生成（Tripo/Meshy，见 bambu-studio-ai/generate.py）
-- 多色需求 → 转交 AMS 编排流程（colorize）
+- 找到模型 → 用户要改尺寸/开孔 → 转交改模类 skill（如同系列的 remodel-model：
+  「找到模型 → 改好 → 打印」管线，支持 resize --keep-holes 保孔改尺寸）
+- 找不到 → 征询用户走生成兜底（Tripo/Meshy 类文生 3D 服务）
+- 多色需求 → 转交 AMS/多色打印编排（如已安装）
 
 ## 合规红线
 
@@ -159,4 +164,7 @@ HTML 图墙规范（实测可行配方）：
 | 排序参数 | `search_mw.py "phone stand" --order downloads --limit 3` | dl 降序 |
 | --meta 国际站 | `search_mw.py --meta ".../models/717070-phone-stand"` | fetched:true，官方字段齐 |
 | --meta .cn 站 | `search_mw.py --meta ".../models/1270816"` (makerworld.com.cn) | 报独立 ID 空间错误，不返回错配数据 |
-| 端到端时延 | `time search_mw.py "phone stand" --source intl` | ~2s（官方搜索 0.6s + 补全） |
+| 端到端时延 | `time search_mw.py "phone stand" --source intl` | ~2s（官方搜索 0.6s + 补全；auto 模式 Printables 已并行，不叠加 8s） |
+
+**环境注意**：Windows 原生环境用 `python`（无 `python3` 别名）；`time` 在
+PowerShell 里用 `Measure-Command` 替代。依赖仅 `pip install requests`。
